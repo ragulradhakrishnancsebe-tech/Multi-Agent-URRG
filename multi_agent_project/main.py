@@ -39,8 +39,21 @@ class SessionRequest(BaseModel):
 SESSION_MEMORY: dict = {}   # { session_id: [ {user: ..., assistant: ...} ] }
 SESSION_DOCS:   dict = {}   # { session_id: [ file_path, ... ] }
 
+# ✅ Store conversation summary per session
+SESSION_SUMMARY: dict = {}  # { session_id: "conversation summary" }
+
 # --- Graph cache per model ---
 GRAPH_CACHE: dict = {}
+
+# ✅ Limit memory size to prevent token explosion
+MAX_HISTORY = 4
+
+
+def trim_history(history):
+    if not history:
+        return []
+    return history[-MAX_HISTORY:]
+
 
 def get_compiled_graph(model_type: str):
     """Cache compiled graph — never rebuild unless model changes."""
@@ -69,6 +82,8 @@ async def reset_session(request: SessionRequest):
     # ✅ Clear memory and docs for this session only
     SESSION_MEMORY.pop(request.session_id, None)
     SESSION_DOCS.pop(request.session_id,   None)
+    SESSION_SUMMARY.pop(request.session_id, None)
+
     print(f"🔄 Session '{request.session_id}' cleared")
     return {"status": "session cleared successfully"}
 
@@ -83,6 +98,9 @@ async def chat(request: QueryRequest):
         # ✅ Get history from SESSION_MEMORY
         history = SESSION_MEMORY.get(request.session_id, [])
 
+        # ✅ Trim history to reduce tokens
+        history = trim_history(history)
+
         print(f"📋 Session '{request.session_id}' | "
               f"turns: {len(history)} | query: '{request.query}'")
 
@@ -95,7 +113,7 @@ async def chat(request: QueryRequest):
             "rag_response":      "",
             "research_response": "",
             "general_response":  "",
-            "summary":           "",
+            "summary":           SESSION_SUMMARY.get(request.session_id, ""),  # ✅ pass summary
         }
 
         # ✅ Config required because graph compiled with checkpointer
@@ -107,6 +125,10 @@ async def chat(request: QueryRequest):
 
         # --- Invoke graph with config ---
         final_state = compiled_graph.invoke(initial_state, config=config)
+
+        # ✅ Save updated summary
+        if final_state.get("summary"):
+            SESSION_SUMMARY[request.session_id] = final_state["summary"]
 
         # --- Extract best response ---
         response = None
@@ -131,6 +153,11 @@ async def chat(request: QueryRequest):
             "user":      request.query,
             "assistant": response,
         })
+
+        # ✅ Trim stored memory as well
+        SESSION_MEMORY[request.session_id] = trim_history(
+            SESSION_MEMORY[request.session_id]
+        )
 
         print(f"✅ Turn {len(SESSION_MEMORY[request.session_id])} saved "
               f"— session '{request.session_id}'")

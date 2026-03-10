@@ -8,115 +8,109 @@ from typing import List, Dict, Any
 
 
 class ResearchAgent:
+
     def __init__(self, model_type="gemini"):
-        self.tavily = TavilyClient(api_key=TAVILY_API_KEY)
-        self.llm    = get_gemini_llm() if model_type == "gemini" else get_groq_llm()
+
+        self.tavily = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
+        self.llm = get_gemini_llm() if model_type == "gemini" else get_groq_llm()
 
     def query(
         self,
         user_query: str,
-        history:    List[Dict[str, Any]] = None,
+        history: List[Dict[str, Any]] = None,
     ) -> str:
-        try:
-            # ── Tavily search ─────────────────────────────
-            search_results = self.tavily.search(user_query, max_results=3)
 
-            if not search_results:
-                return f"Research query failed: No search results for '{user_query}'"
+        try:
+
+            if not self.tavily:
+                return "Search service not configured."
+
+            # 🔎 Advanced Tavily Search
+            search_results = self.tavily.search(
+                query=user_query,
+                max_results=5,
+                search_depth="advanced"
+            )
 
             results = search_results.get("results", [])
-            if not results:
-                return f"Research query failed: No search results for '{user_query}'"
 
-            # ── Extract content and reference links ───────
-            combined_text   = ""
+            if not results:
+                return f"No search results found for '{user_query}'."
+
+            combined_text = ""
             reference_links = []
 
+            # 📚 Build context for LLM
             for i, result in enumerate(results, start=1):
-                title   = result.get("title",   "")
-                content = result.get("content", "")
-                url     = result.get("url",     "")
 
-                if title or content:
-                    combined_text += (
-                        f"Title:   {title}\n"
-                        f"URL:     {url}\n"
-                        f"Content: {content}\n\n"
-                    )
+                title = result.get("title", "")
+                content = (result.get("content") or "")[:500]
+                url = result.get("url", "")
+
+                combined_text += (
+                    f"[{i}] {title}\n"
+                    f"{content}\n\n"
+                )
 
                 if url:
                     reference_links.append(f"[{i}] {title}: {url}")
 
-            if not combined_text.strip():
-                return f"Could not extract content for query: {user_query}"
-
-            # ── Build messages with history ───────────────
+            # 🧠 LLM Instructions
             messages = [
-                SystemMessage(content=(
-                    "You are a research assistant with web search capabilities.\n\n"
-
-                    "Rules:\n"
-                    "- Use the provided search results to answer the user's question.\n"
-                    "- Do not invent facts that are not present in the search results.\n"
-                    "- If information is missing, say it clearly.\n\n"
-
-                    "Formatting Rules:\n"
-                    "- Always respond using clean Markdown.\n"
-                    "- Use headings (##) for major sections when helpful.\n"
-                    "- Use bullet points instead of long paragraphs.\n"
-                    "- Avoid large tables unless the user explicitly asks for them.\n"
-                    "- Keep answers concise and readable for a chat interface.\n\n"
-
-                    "Conversation Rules:\n"
-                    "- You have access to the full conversation history.\n"
-                    "- Use history to resolve follow-up questions.\n"
-                    "- Maintain natural conversation flow.\n\n"
-
-                    "Important:\n"
-                    "- Do NOT include reference links inside the answer body.\n"
-                    "- Reference links will be appended separately after the answer."
-                ))
+                SystemMessage(
+                    content=(
+                        "You are a professional research assistant.\n\n"
+                        "Use the provided search results to answer the question.\n"
+                        "Cite sources using [number] like [1], [2].\n"
+                        "Write a structured markdown answer with:\n"
+                        "- Short sections\n"
+                        "- Bullet points\n"
+                        "- Clear explanation\n\n"
+                        "Only use the provided search data."
+                    )
+                )
             ]
 
-            # ✅ Inject conversation history
+            # 📜 Add limited conversation history
             if history:
-                for turn in history:
-                    if isinstance(turn, dict):
-                        if turn.get("user"):
-                            messages.append(
-                                HumanMessage(content=turn["user"])
-                            )
-                        if turn.get("assistant"):
-                            messages.append(
-                                AIMessage(content=turn["assistant"])
-                            )
 
-            # ✅ Add current query with search context
+                history = history[-3:]
+
+                for turn in history:
+
+                    if turn.get("user"):
+                        messages.append(HumanMessage(content=turn["user"]))
+
+                    if turn.get("assistant"):
+                        messages.append(AIMessage(content=turn["assistant"]))
+
+            # ❓ Add research question
             messages.append(
-                HumanMessage(content=(
-                    f"Search Results:\n{combined_text[:4000]}\n\n"
-                    f"Based on the above search results, provide a comprehensive "
-                    f"answer to the query: '{user_query}'"
-                ))
+                HumanMessage(
+                    content=(
+                        f"Search Results:\n{combined_text}\n"
+                        f"Question: {user_query}"
+                    )
+                )
             )
 
-            # ── Query LLM ─────────────────────────────────
+            # 🤖 LLM Response
             response = self.llm.invoke(messages)
-            summary  = response.content
 
-            if not summary:
-                return f"Could not generate summary for query: {user_query}"
+            summary = response.content if hasattr(response, "content") else str(response)
 
-            # ── Append reference links (same as before) ───
             final_response = summary
+
+            # 🔗 Add references
             if reference_links:
-                final_response += "\n\n--- Reference Links ---\n"
+                final_response += "\n\n---\n### References\n"
                 for link in reference_links:
-                    final_response += link + "\n"
+                    final_response += f"{link}\n"
 
             return final_response
 
         except Exception as e:
+
             error_msg = f"Research agent error: {type(e).__name__}: {str(e)}"
             print(error_msg)
             return error_msg

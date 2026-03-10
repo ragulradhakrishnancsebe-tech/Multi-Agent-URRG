@@ -5,86 +5,85 @@ from typing import List, Dict, Any
 
 
 class SummarizeAgent:
+
     def __init__(self, model_type="gemini"):
+
         self.llm = get_gemini_llm() if model_type == "gemini" else get_groq_llm()
 
     def summarize(
         self,
-        rag_resp:      str,
+        rag_resp: str,
         research_resp: str,
-        history:       List[Dict[str, Any]] = None,
+        history: List[Dict[str, Any]] = None,
     ) -> str:
+
         try:
-            # ── Build messages with history ───────────────
+
+            # ── Skip summarizer if only one source ──
+
+            if rag_resp and not research_resp:
+                return rag_resp
+
+            if research_resp and not rag_resp:
+                return research_resp
+
+            if not rag_resp and not research_resp:
+                return ""
+
+            # ── Short system prompt ──
+
             messages = [
-                SystemMessage(content=(
-                    "You are a summarization assistant.\n\n"
-
-                    "Your task is to combine and summarize information from:\n"
-                    "1. RAG responses (information from uploaded documents)\n"
-                    "2. Research responses (information from web search)\n\n"
-
-                    "Rules:\n"
-                    "- Merge both sources into one coherent answer.\n"
-                    "- Remove duplicated information.\n"
-                    "- If both sources say similar things, combine them.\n"
-                    "- If one source adds extra insight, include it clearly.\n\n"
-
-                    "Formatting Rules:\n"
-                    "- Always respond using clean Markdown.\n"
-                    "- Use headings (##) when useful.\n"
-                    "- Use bullet points for lists.\n"
-                    "- Avoid large tables unless necessary.\n"
-                    "- Keep the answer concise and readable for chat UI.\n\n"
-
-                    "Conversation Rules:\n"
-                    "- You have access to the full conversation history.\n"
-                    "- Use history to understand follow-up questions.\n"
-                    "- Maintain context from earlier messages.\n\n"
-
-                    "Goal:\n"
-                    "Produce a clear, unified answer that reads like a single response."
-                ))
+                SystemMessage(
+                    content=(
+                        "Combine document and web information into one clear answer. "
+                        "Remove duplicate information. "
+                        "Respond clearly using markdown, short sections, and bullet points."
+                    )
+                )
             ]
 
-            # ✅ Inject conversation history
+            # ── Limit history ──
+
             if history:
+
+                history = history[-2:]
+
                 for turn in history:
-                    if isinstance(turn, dict):
-                        if turn.get("user"):
-                            messages.append(
-                                HumanMessage(content=turn["user"])
-                            )
-                        if turn.get("assistant"):
-                            messages.append(
-                                AIMessage(content=turn["assistant"])
-                            )
 
-            # ── Build summary prompt ──────────────────────
-            parts = []
+                    if turn.get("user"):
+                        messages.append(
+                            HumanMessage(content=turn["user"])
+                        )
 
-            if rag_resp and rag_resp.strip():
-                parts.append(f"RAG Response (from uploaded documents):\n{rag_resp.strip()}")
+                    if turn.get("assistant"):
+                        messages.append(
+                            AIMessage(content=turn["assistant"])
+                        )
 
-            if research_resp and research_resp.strip():
-                parts.append(f"Research Response (from web search):\n{research_resp.strip()}")
+            # ── Compress responses ──
 
-            combined = "\n\n".join(parts)
+            rag_text = (rag_resp or "")[:800]
+            research_text = (research_resp or "")[:800]
 
-            # ✅ Add current summarization request
             messages.append(
-                HumanMessage(content=(
-                    f"Please summarize and combine the following responses "
-                    f"into a single, clear, well-structured answer:\n\n"
-                    f"{combined}"
-                ))
+                HumanMessage(
+                    content=(
+                        f"Document info:\n{rag_text}\n\n"
+                        f"Web info:\n{research_text}\n\n"
+                        f"Create a single clear answer."
+                    )
+                )
             )
 
-            # ── Query LLM ─────────────────────────────────
             response = self.llm.invoke(messages)
-            return response.content
+
+            if hasattr(response, "content"):
+                return response.content
+
+            return str(response)
 
         except Exception as e:
+
             error_msg = f"Summarize agent error: {type(e).__name__}: {str(e)}"
             print(error_msg)
             return error_msg

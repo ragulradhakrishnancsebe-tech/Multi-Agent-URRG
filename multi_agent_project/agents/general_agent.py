@@ -5,56 +5,53 @@ from typing import List, Dict, Any
 
 
 class GeneralAgent:
+
     def __init__(self, model_type="gemini"):
         self.llm = get_gemini_llm() if model_type == "gemini" else get_groq_llm()
 
     def respond(
         self,
         user_query: str,
-        history:    List[Dict[str, Any]] = None,
+        history: List[Dict[str, Any]] = None,
     ) -> str:
+
         try:
-            # ── System prompt ─────────────────────────────
+
+            # ✅ Short system prompt (token optimized)
             messages = [
-                SystemMessage(content=(
-                    "You are a helpful, friendly AI assistant.\n\n"
-
-                    "Formatting Rules:\n"
-                    "- Always respond in clean Markdown.\n"
-                    "- Use headings (##) for main sections.\n"
-                    "- Use bullet points instead of long paragraphs.\n"
-                    "- Avoid large tables unless the user explicitly asks for a table.\n"
-                    "- Keep responses clear and readable for chat UI.\n"
-                    "- Use short paragraphs.\n\n"
-
-                    "Conversation Rules:\n"
-                    "- You have access to the full conversation history.\n"
-                    "- Use history to answer follow-up questions correctly.\n"
-                    "- Remember details the user mentioned earlier.\n"
-                    "- Maintain natural and coherent conversation.\n"
-                    "- Never say you don't know something already mentioned in history."
-                ))
+                SystemMessage(
+                    content=(
+                        "You are a helpful AI assistant. "
+                        "Respond clearly using markdown, short sections, and bullet points."
+                    )
+                )
             ]
 
-            # ✅ Inject conversation history
+            # ✅ Limit history to last 3 turns
             if history:
-                for turn in history:
-                    if isinstance(turn, dict):
-                        if turn.get("user"):
-                            messages.append(
-                                HumanMessage(content=turn["user"])
-                            )
-                        if turn.get("assistant"):
-                            messages.append(
-                                AIMessage(content=turn["assistant"])
-                            )
+                history = history[-3:]
 
-            # ✅ Add current query
+                for turn in history:
+                    if turn.get("user"):
+                        messages.append(
+                            HumanMessage(content=turn["user"])
+                        )
+
+                    if turn.get("assistant"):
+                        messages.append(
+                            AIMessage(content=turn["assistant"])
+                        )
+
+            # ✅ Current user query
             messages.append(HumanMessage(content=user_query))
 
-            # ── Invoke LLM ────────────────────────────────
             response = self.llm.invoke(messages)
-            return response.content
+
+            # ✅ Safe response extraction
+            if hasattr(response, "content"):
+                return response.content
+
+            return str(response)
 
         except Exception as e:
             error_msg = f"General agent error: {type(e).__name__}: {str(e)}"

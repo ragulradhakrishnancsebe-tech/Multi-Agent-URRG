@@ -8,108 +8,131 @@ from models.groq_model import get_groq_llm
 from typing import List, Dict, Any
 import os
 
-# ── Embeddings ───────────────────────────────────────────
+
 embedding_models = {
-    "en":    HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2"),
+    "en": HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2"),
     "multi": HuggingFaceEmbeddings(model_name="intfloat/multilingual-e5-large"),
 }
 
 
 class RAGAgent:
+
     def __init__(self, model_type="gemini", embedding_type="en"):
-        self.llm       = get_gemini_llm() if model_type == "gemini" else get_groq_llm()
-        self.embedding = embedding_models[embedding_type]
+
+        self.llm = get_gemini_llm() if model_type == "gemini" else get_groq_llm()
+        self.embedding = embedding_models.get(embedding_type, embedding_models["en"])
+
+        self.vectordb = None
+        self.loaded_docs = set()
+
+
+    # ── Build vector database once ─────────────────
+
+    def load_documents(self, uploaded_docs: List[str]):
+
+        all_docs = []
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=300,
+            chunk_overlap=50,
+        )
+
+        for file_path in uploaded_docs:
+
+            if file_path in self.loaded_docs:
+                continue
+
+            if os.path.exists(file_path):
+
+                loader = PyPDFLoader(file_path)
+                docs = loader.load()
+
+                docs_split = splitter.split_documents(docs)
+                all_docs.extend(docs_split)
+
+                self.loaded_docs.add(file_path)
+
+        if not all_docs:
+            return False
+
+        if self.vectordb is None:
+            self.vectordb = Chroma.from_documents(
+                all_docs,
+                embedding=self.embedding
+            )
+        else:
+            self.vectordb.add_documents(all_docs)
+
+        return True
+
+
+    # ── Query documents ─────────────────────────────
 
     def query(
         self,
-        user_query:    str,
-        uploaded_docs: List[str],
-        history:       List[Dict[str, Any]] = None,
+        user_query: str,
+        history: List[Dict[str, Any]] = None,
     ) -> str:
-        try:
-            if not uploaded_docs:
-                return "No documents uploaded for RAG query."
 
-            # ── Load and split documents ─────────────────
-            all_docs = []
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=500,
-                chunk_overlap=100,
+        try:
+
+            if self.vectordb is None:
+                return "Documents not loaded."
+
+            search_results = self.vectordb.similarity_search(
+                user_query,
+                k=2
             )
 
-            for file_path in uploaded_docs:
-                if os.path.exists(file_path):
-                    try:
-                        loader    = PyPDFLoader(file_path)
-                        docs      = loader.load()
-                        docs_split = splitter.split_documents(docs)
-                        all_docs.extend(docs_split)
-                    except Exception as e:
-                        print(f"Error loading {file_path}: {e}")
-                        continue
+            if not search_results:
+                return "No relevant information found in uploaded documents."
 
-            if not all_docs:
-                return "No readable content in uploaded documents."
+            context_text = "\n\n".join(
+                [doc.page_content for doc in search_results]
+            )
 
-            # ── Create Chroma vectorstore ─────────────────
-            vectordb = Chroma.from_documents(all_docs, embedding=self.embedding)
-
-            # ── Similarity search ─────────────────────────
-            search_results = vectordb.similarity_search_with_score(user_query, k=3)
-            context_text   = "\n\n".join([
-                doc.page_content for doc, score in search_results
-            ])
-
-            # ── Build messages with history ───────────────
             messages = [
-                SystemMessage(content=(
-                    "You are a document analysis assistant.\n\n"
-
-                    "Rules:\n"
-                    "- Answer using ONLY the provided document context.\n"
-                    "- If the answer is not present in the documents, clearly say: "
-                    "'The answer is not found in the provided documents.'\n\n"
-
-                    "Formatting Rules:\n"
-                    "- Always respond in clean Markdown.\n"
-                    "- Use headings (##) for main sections when appropriate.\n"
-                    "- Use bullet points instead of long paragraphs.\n"
-                    "- Avoid large tables unless the user explicitly asks for them.\n"
-                    "- Keep responses concise and readable for chat UI.\n\n"
-
-                    "Conversation Rules:\n"
-                    "- You have access to the full conversation history.\n"
-                    "- Use history to understand follow-up questions.\n"
-                    "- Maintain a coherent conversation with the user."
-                ))
+                SystemMessage(
+                    content=(
+                        "Answer using the provided document context. "
+                        "If the answer is not in the document, say so. "
+                        "Respond clearly using markdown, short sections, and bullet points."
+                    )
+                )
             ]
 
-            # ✅ Inject conversation history
+            # limit history
             if history:
-                for turn in history:
-                    if isinstance(turn, dict):
-                        if turn.get("user"):
-                            messages.append(
-                                HumanMessage(content=turn["user"])
-                            )
-                        if turn.get("assistant"):
-                            messages.append(
-                                AIMessage(content=turn["assistant"])
-                            )
 
-            # ✅ Add current query with document context
+                history = history[-3:]
+
+                for turn in history:
+
+                    if turn.get("user"):
+                        messages.append(
+                            HumanMessage(content=turn["user"])
+                        )
+
+                    if turn.get("assistant"):
+                        messages.append(
+                            AIMessage(content=turn["assistant"])
+                        )
+
             messages.append(
-                HumanMessage(content=(
-                    f"Document Context:\n{context_text}\n\n"
-                    f"Question: {user_query}"
-                ))
+                HumanMessage(
+                    content=f"Context:\n{context_text}\n\nQuestion: {user_query}"
+                )
             )
 
-            # ── Query LLM ─────────────────────────────────
             response = self.llm.invoke(messages)
-            return response.content
+
+            if hasattr(response, "content"):
+                return response.content
+
+            return str(response)
 
         except Exception as e:
+
             error_msg = f"RAG agent error: {type(e).__name__}: {str(e)}"
             print(error_msg)
             return error_msg
